@@ -1,43 +1,54 @@
 # wxl-maxzoom
 
-**Lift the World of Warcraft 3.3.5a (build 12340) camera zoom-out limit far past the stock ceiling — adjustable live.**
+**Unlock the World of Warcraft 3.3.5a (build 12340) camera — zoom-out, view distance, and fog — far past the stock limits, adjustable live.**
 
-A [WarcraftXL](https://github.com/WarcraftXL) module. The default client only lets the camera pull
-back a short distance; the UI slider stops even shorter. `wxl-maxzoom` raises the client's own
-`cameraDistanceMaxFactor` console variable so you can zoom way out — great for getting the whole
-fight, a landscape, or a raid on screen at once.
+A [WarcraftXL](https://github.com/WarcraftXL) module. Stock, the client only lets the camera pull back
+a short way, draws terrain out to ~791 yards, and drowns the distance in fog. `wxl-maxzoom` takes all
+three limits off: pull the camera way out, push the view distance to the horizon, and switch the
+distance fog off — for a whole-fight, whole-landscape, or map-scale view.
 
 > Built by [Michael Malura](https://malura.de).
 
-![Zoomed all the way out at factor 30 — the character is a speck far below](store/screenshot.png)
+![Fog off, view distance far, zoom 30 — a whole valley to the horizon](store/screenshot.png)
 
 ## How it works
 
-Two levers, together, take the camera far past its stock limit:
+Each limit was found by reverse-engineering the client with [Ghidra](https://ghidra-sre.org/) (build
+12340), then lifted the least invasive way that works.
 
-**1. The multiplier.** The client's `cameraDistanceMaxFactor` console variable scales the base camera
-distance (`cameraDistanceMax`, default 15). The mod raises it through the client's *own* Lua/CVar
-path — WarcraftXL exposes the engine's verified FrameScript executor, so it runs
-`SetCVar("cameraDistanceMaxFactor", ...)` in the client's script context.
+**1. Zoom — the multiplier.** The `cameraDistanceMaxFactor` CVar scales the base camera distance
+(`cameraDistanceMax`, default 15). The mod raises it through the client's *own* Lua/CVar path —
+WarcraftXL exposes the engine's verified FrameScript executor — then calls `CameraZoomOut` so the
+camera snaps to the new distance on the spot (with the move/smooth-speed CVars cranked so it's near
+instant).
 
-**2. The hard clamp.** On its own, lever 1 stops at ~50 yards: the engine computes the effective
-distance as `min(cameraDistanceMaxFactor * cameraDistanceMax, 50.0)`, and that `50.0` is a hard
-ceiling — a single float constant in the client's `.rdata` at `0x00A1E2FC`, reverse-engineered with
-[Ghidra](https://ghidra-sre.org/) against build 12340. (It's *why* factor 6 and factor 30 looked
-identical — both were clamped to the same wall.) The mod lifts that ceiling in process memory
-(`VirtualProtect` → write → restore), so the multiplier actually controls the distance:
-factor 30 → ~450 yards.
+**2. Zoom — the hard clamp.** On its own, lever 1 stops at ~50 yards: the engine computes the
+effective distance as `min(cameraDistanceMaxFactor * cameraDistanceMax, 50.0)`, and that `50.0` is a
+hard ceiling — a single float in `.rdata` at `0x00A1E2FC`. (It's *why* factor 6 and factor 30 looked
+identical — both hit the same wall.) The mod lifts it in process memory so the multiplier really
+controls the distance: factor 30 → ~450 yards.
 
-Both are re-asserted on every world enter (the client reloads CVars across loading screens), so the
-zoom sticks across logins and zone changes.
+**3. View distance (farclip).** The `farclip` CVar sets the render far plane. Stock it clamps to
+~791 yards; setting `farClipOverride` = 1 raises the engine's own cap to ~1583 (both caps are `.rdata`
+floats found with Ghidra). To go past 1583 the mod lifts the high-cap float at `0x00A3E710`, then
+drives `farclip` from a slider up to 10000.
+
+**4. Fog.** WoW's world fog is not a CVar; it is produced every frame by the sky/light system, and the
+engine's own fog override is capped by its distance ceiling (so it can't clear fog). The mod instead
+hooks the exact per-frame fog producer (`0x007F16F0`) and, while the toggle is on, overwrites the fog
+near/far it just wrote (`0x00D38B90` / `0x00D38B94`) with values far past the horizon — nothing in the
+world reaches them, so distance fog never blends in.
+
+The CVar-driven levers are re-asserted on every world enter (the client reloads CVars across loading
+screens); the fog toggle rides a persistent per-frame hook.
 
 ### Is it safe?
 
-- The memory write is **guarded**: it fires only when the address holds the known stock value
-  (`50.0f`), touches one 4-byte float, and is **not persisted to disk** — restarting the client fully
-  reverts it.
+- The memory writes are **guarded** (they fire only against the known stock values on client build
+  12340), tiny (single floats), and **not persisted to disk** — restarting the client fully reverts
+  everything.
 - WarcraftXL refuses to load a module built against a different client build than 12340, so the
-  hardcoded address can never be applied to an image where it means something else.
+  hardcoded addresses can never be applied to an image where they mean something else.
 
 ## Install
 
@@ -51,12 +62,13 @@ find **Max Zoom**, and hit install.
 
 ## Use
 
-- Just play — the camera max-zoom is raised automatically as soon as you enter the world. Scroll out.
-- Press **F9** to open the WarcraftXL overlay, then use the **Max Zoom** panel's slider to tune the
-  multiplier live (1.0 = stock, higher pulls further back) — all the way up to a map-scale **30x**.
+Press **F9** to open the WarcraftXL overlay, then use the **Max Zoom** panel:
 
-The default multiplier is `10`, and the slider goes to `30`. The client validates and clamps the
-value to its own ceiling, so asking for more than it will grant is harmless — it just settles there.
+- **`cameraDistanceMaxFactor`** slider (1–30): drives the camera in/out live, near-instantly. Default 10.
+- **`farclip (yards)`** slider (500–10000): the render view distance. Default 2000 (stock max is ~791).
+- **`Disable fog`** checkbox: switches the distance fog off.
+
+All of it is applied automatically on world enter too, so it sticks across logins and zone changes.
 
 ## Build from source
 

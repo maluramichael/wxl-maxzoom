@@ -1,4 +1,4 @@
-// wxl-maxzoom: lift the World of Warcraft 3.3.5a camera zoom-out limit far past the stock ceiling.
+// wxl-maxzoom: unlock the World of Warcraft 3.3.5a camera -- zoom-out, view distance, and fog.
 // Copyright (C) 2026 Michael Malura <michael@malura.de> -- https://malura.de
 //
 // This program is free software: you can redistribute it and/or modify
@@ -32,8 +32,19 @@
 //    yards. The patch is guarded to only fire when the stock value (50.0) is present, touches one
 //    4-byte float, and is not persisted to disk -- a restart of the client fully reverts it.
 //
-// Both are re-asserted on every world enter (login / loading screen), and the factor is adjustable
-// live from the WarcraftXL overlay via a slider.
+// 3. View distance. The `farclip` CVar sets the render far plane. Stock it clamps to ~791 yards;
+//    setting `farClipOverride` = 1 raises that to the engine's own high cap of ~1583 (both caps are
+//    .rdata floats found with Ghidra). To go past 1583 we lift the high-cap float at 0x00A3E710 in
+//    memory (same guarded technique as the camera clamp), then drive `farclip` from a slider.
+//
+// 4. Fog. WoW's world fog is not a CVar; it is produced per frame by the sky/light system, and the
+//    engine's high-level fog override is capped by its own distance ceiling (so it cannot fully clear
+//    fog). We instead hook the exact per-frame fog producer (Sky landmark kFogUpdate, build 12340) and,
+//    while the "Disable fog" toggle is on, overwrite the fog near/far it just wrote with values far past
+//    the horizon -- nothing in the world reaches them, so distance fog never blends in.
+//
+// Everything is re-asserted on every world enter (the client reloads state across loading screens),
+// and all of it is adjustable live from the WarcraftXL overlay (F9).
 
 #include "wxl/EventScript.hpp"   // wxl::ext::EventScript + the shared wxl::events::Event enum
 #include "game/Script.hpp"        // pulls in the verified wxl::offsets::engine::lua landmarks
@@ -64,6 +75,24 @@ namespace wxl_maxzoom
     constexpr float     kStockClamp   = 50.0f;      // the value the stock client ships
     constexpr float     kLiftedClamp  = 100000.0f;  // effectively "no ceiling"; the factor now decides
 
+    // View distance (farclip). Defaults: stock max ~791, or ~1583 with farClipOverride=1. We lift the
+    // high-cap float (Ghidra: 0x00A3E710, stock ~1583.33) so the slider can drive it much further.
+    constexpr float     kDefaultViewDist   = 2000.0f;
+    constexpr float     kViewDistMin       = 500.0f;
+    constexpr float     kViewDistMax       = 10000.0f;
+    constexpr uintptr_t kFarclipCapAddr    = 0x00A3E710;
+    constexpr float     kLiftedFarclipCap  = 100000.0f;
+
+    // Fog. WarcraftXL's higher-level SetOverrideFog is capped by the engine's own distance ceiling, so
+    // it cannot fully clear fog. Instead we hook the exact per-frame fog producer (Sky landmark
+    // kFogUpdate) and, while the toggle is on, overwrite the fog near/far it just wrote with values far
+    // past the horizon -- nothing in the world reaches them, so distance fog vanishes. Addresses are
+    // spelled out here (build 12340) so this file stays free of any direct offsets/ include.
+    constexpr uintptr_t kFogUpdate = 0x007F16F0; // __cdecl void(void): produces the frame's fog near/far
+    constexpr uintptr_t kFogNear   = 0x00D38B90; // f32 fog start distance (terrain/sky consume it)
+    constexpr uintptr_t kFogFar    = 0x00D38B94; // f32 fog end distance
+    using FogUpdateFn = void(__cdecl*)();
+
     /// Raise the engine's hard camera-distance ceiling in process memory. Idempotent and guarded:
     /// it writes only when the address currently holds the known stock value (or our lifted one), so
     /// a wrong image is left untouched. Returns true if the ceiling is now lifted.
@@ -79,6 +108,40 @@ namespace wxl_maxzoom
         DWORD tmp = 0;
         VirtualProtect(p, sizeof(float), old, &tmp);
         return known;
+    }
+
+    /// Raise the engine's high farclip cap so `farclip` can be driven past its ~1583 ceiling. Guarded
+    /// to the known stock value (range-checked, since 1583.33 has no exact float literal) or our lifted
+    /// one. Returns true if the cap is now lifted.
+    static bool LiftFarclipCap()
+    {
+        float* p = reinterpret_cast<float*>(kFarclipCapAddr);
+        DWORD old = 0;
+        if (!VirtualProtect(p, sizeof(float), PAGE_READWRITE, &old))
+            return false;
+        const bool known = (*p > 1583.0f && *p < 1584.0f) || *p == kLiftedFarclipCap;
+        if (known)
+            *p = kLiftedFarclipCap;
+        DWORD tmp = 0;
+        VirtualProtect(p, sizeof(float), old, &tmp);
+        return known;
+    }
+
+    // Set by the fog toggle; read every frame by the fog-update detour below.
+    bool        g_fogDisabled   = false;
+    FogUpdateFn g_origFogUpdate = nullptr;
+
+    /// Runs right after the engine recomputes the frame's fog. While disabled, shove the fog band past
+    /// the horizon so nothing drawn in the world reaches it -- the fog is simply never blended in.
+    static void __cdecl FogUpdateDetour()
+    {
+        if (g_origFogUpdate)
+            g_origFogUpdate();
+        if (g_fogDisabled)
+        {
+            *reinterpret_cast<float*>(kFogNear) = 90000.0f;
+            *reinterpret_cast<float*>(kFogFar)  = 100000.0f;
+        }
     }
 
     /// Runs a line of Lua in the client's active FrameScript context, or does nothing if scripting is
@@ -97,28 +160,56 @@ namespace wxl_maxzoom
     public:
         MaxZoom()
         {
-            // Re-assert the zoom ceiling every time a map finishes loading: the client reloads CVars
-            // across loading screens, so a single apply at startup would not stick.
+            // Re-assert the CVar-driven levers every time a map finishes loading: the client reloads
+            // CVars across loading screens, so a single apply would not stick. (Fog rides a per-frame
+            // hook instead, so it needs no re-assert.)
             on<&MaxZoom::OnWorldEnter>(wxl::events::Event::OnWorldEnter);
         }
 
-        float* Factor() { return &factor_; }
+        float* Factor()       { return &factor_; }
+        float* ViewDistance() { return &viewDistance_; }
+        int*   FogDisabled()  { return &fogDisabled_; }
 
-        /// Lift the engine's hard ceiling, then push the current factor into the client's CVar. Safe
-        /// to call at any time; the CVar half is a no-op until scripting exists.
-        void Apply()
+        /// Lift the hard camera ceiling, raise the max-distance CVar, and immediately pull the camera
+        /// out to that new maximum. The engine also snaps the camera IN when the factor drops below the
+        /// current distance, so the slider drives the camera both ways on the spot. The move/smooth
+        /// speed CVars are cranked so that motion is near-instant instead of a slow glide.
+        /// CameraZoomOut clamps to the max, so the margin just guarantees we hit it.
+        void ApplyZoom()
         {
             LiftCameraClamp();
-            char lua[96];
+            char lua[256];
             std::snprintf(lua, sizeof(lua),
-                          "SetCVar(\"cameraDistanceMaxFactor\", \"%.2f\")", factor_);
+                          "SetCVar(\"cameraDistanceMoveSpeed\", \"50\");"
+                          "SetCVar(\"cameraDistanceSmoothSpeed\", \"50\");"
+                          "SetCVar(\"cameraDistanceMaxFactor\", \"%.2f\");"
+                          "CameraZoomOut(%.0f)",
+                          factor_, factor_ * 15.0f + 10.0f);
             RunLua(lua);
         }
 
-    private:
-        void OnWorldEnter(const wxl::events::WorldEnterArgs&) { Apply(); }
+        /// Lift the farclip cap, unlock the override, and set the render far plane from the slider.
+        void ApplyViewDistance()
+        {
+            LiftFarclipCap();
+            char lua[128];
+            std::snprintf(lua, sizeof(lua),
+                          "SetCVar(\"farClipOverride\", \"1\"); SetCVar(\"farclip\", \"%.0f\")",
+                          viewDistance_);
+            RunLua(lua);
+        }
 
-        float factor_ = kDefaultFactor;
+        /// Publish the toggle to the per-frame fog detour. Cheap; safe anywhere.
+        void ApplyFog() { g_fogDisabled = (fogDisabled_ != 0); }
+
+        void ApplyAll() { ApplyZoom(); ApplyViewDistance(); ApplyFog(); }
+
+    private:
+        void OnWorldEnter(const wxl::events::WorldEnterArgs&) { ApplyAll(); }
+
+        float factor_       = kDefaultFactor;
+        float viewDistance_ = kDefaultViewDist;
+        int   fogDisabled_  = 0;      // int, not bool: UiCheckbox writes through an int*
     };
 
     // Constructed in WXL_Load, never at static-init: wxl::ext::EventScript binds through the service
@@ -131,16 +222,22 @@ namespace wxl_maxzoom
     static void PanelBody(void* /*user*/)
     {
         if (!g_api || !g_maxzoom) return;
-        g_api->UiText("Camera zoom-out multiplier.");
-        g_api->UiText("Stock client = 1.0. Higher pulls the camera further back.");
+
+        g_api->UiText("Camera zoom-out multiplier. Stock = 1.0; higher pulls the camera back.");
+        if (g_api->UiSliderFloat("cameraDistanceMaxFactor", g_maxzoom->Factor(), kSliderMin, kSliderMax))
+            g_maxzoom->ApplyZoom(); // live: apply the instant the slider moves
+        if (g_api->UiButton("Apply zoom now"))
+            g_maxzoom->ApplyZoom();
+
         g_api->UiSeparator();
+        g_api->UiText("View distance (farclip). Stock max ~791 yards.");
+        if (g_api->UiSliderFloat("farclip (yards)", g_maxzoom->ViewDistance(), kViewDistMin, kViewDistMax))
+            g_maxzoom->ApplyViewDistance();
 
-        float* f = g_maxzoom->Factor();
-        if (g_api->UiSliderFloat("cameraDistanceMaxFactor", f, kSliderMin, kSliderMax))
-            g_maxzoom->Apply(); // live: apply the instant the slider moves
-
-        if (g_api->UiButton("Apply now"))
-            g_maxzoom->Apply();
+        g_api->UiSeparator();
+        g_api->UiText("Distance fog.");
+        if (g_api->UiCheckbox("Disable fog", g_maxzoom->FogDisabled()))
+            g_maxzoom->ApplyFog();
     }
 }
 
@@ -151,7 +248,7 @@ const WXL_PluginInfo* __cdecl WXL_Query(void)
         sizeof(WXL_PluginInfo),
         WXL_API_VERSION,
         "wxl-maxzoom",
-        3,
+        4,
         WXL_CLIENT_BUILD,
     };
     return &info;
@@ -167,12 +264,24 @@ int __cdecl WXL_Load(const WXL_Api* api)
     wxl::ext::EventScript::Bind(api);              // hand the event base its service table
     wxl_maxzoom::g_maxzoom = new wxl_maxzoom::MaxZoom(); // ctor binds OnWorldEnter, now that Bind ran
 
-    // Lift the hard ceiling now, at load, so it is already gone before the first world render.
-    const bool lifted = wxl_maxzoom::LiftCameraClamp();
+    // Lift both hard ceilings now, at load, so they are gone before the first world render.
+    const bool camLifted = wxl_maxzoom::LiftCameraClamp();
+    const bool fcLifted  = wxl_maxzoom::LiftFarclipCap();
+
+    // Hook the per-frame fog producer so the "Disable fog" toggle can push fog past the horizon.
+    const bool fogHooked = api->HookAttach(
+        "wxl-maxzoom.fog", wxl_maxzoom::kFogUpdate,
+        reinterpret_cast<void*>(&wxl_maxzoom::FogUpdateDetour),
+        reinterpret_cast<void**>(&wxl_maxzoom::g_origFogUpdate),
+        WXL_HOOK_DEFAULT_PRIORITY) != 0;
 
     api->UiAddPanel("Max Zoom", &wxl_maxzoom::PanelBody, nullptr);
     api->Log(WXL_LOG_INFO, "wxl-maxzoom",
-             "max-zoom ready (default factor %.1f, hard ceiling %s)",
-             wxl_maxzoom::kDefaultFactor, lifted ? "lifted" : "NOT lifted (unexpected image?)");
+             "ready (factor %.1f; camera ceiling %s; farclip cap %s; view %.0f; fog hook %s)",
+             wxl_maxzoom::kDefaultFactor,
+             camLifted ? "lifted" : "NOT lifted",
+             fcLifted  ? "lifted" : "NOT lifted",
+             wxl_maxzoom::kDefaultViewDist,
+             fogHooked ? "attached" : "FAILED");
     return 1;
 }
