@@ -9,4 +9,5 @@ frame a whole boss fight, a sweeping landscape, or your entire party at once.
 - **Live control** — open the WarcraftXL overlay (**F9**) and drag the slider to taste.
 - **Sticks** — re-applied on every world enter, so it survives loading screens and logins.
 
-Default multiplier is 3.9× the stock distance. Built by [Michael Malura](https://malura.de).
+Default multiplier is 10×, and the slider runs all the way to a map-scale **30×**. Built by
+[Michael Malura](https://malura.de).

@@ -34,12 +34,13 @@
 
 namespace wxl_maxzoom
 {
-    // The stock client's factor is 1.0 and the default slider stops well short of the CVar's own
-    // ceiling. 3.9 is a large, cinematic pull-back; the client clamps it down to whatever its own
-    // registered maximum is, so asking for more than it allows is harmless.
-    constexpr float kDefaultFactor = 3.9f;
+    // The stock client's factor is 1.0. This build honours values far above the classic ~2.6 UI cap,
+    // so we open the throttle wide: a bold default and a slider that runs all the way to 30x for a
+    // genuinely absurd, map-scale pull-back. The client validates and clamps the value itself, so
+    // asking for more than it will grant is harmless -- it simply settles at its own ceiling.
+    constexpr float kDefaultFactor = 10.0f;
     constexpr float kSliderMin     = 1.0f;
-    constexpr float kSliderMax     = 6.0f;
+    constexpr float kSliderMax     = 30.0f;
 
     // The FrameScript entry points, taken by value from the SDK's verified landmark table (reaching
     // them via game/Script.hpp keeps this file clear of any direct offsets/ include).
@@ -116,7 +117,7 @@ const WXL_PluginInfo* __cdecl WXL_Query(void)
         sizeof(WXL_PluginInfo),
         WXL_API_VERSION,
         "wxl-maxzoom",
-        1,
+        2,
         WXL_CLIENT_BUILD,
     };
     return &info;

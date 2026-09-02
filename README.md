@@ -40,10 +40,10 @@ find **Max Zoom**, and hit install.
 
 - Just play — the camera max-zoom is raised automatically as soon as you enter the world. Scroll out.
 - Press **F9** to open the WarcraftXL overlay, then use the **Max Zoom** panel's slider to tune the
-  multiplier live (1.0 = stock, higher pulls further back).
+  multiplier live (1.0 = stock, higher pulls further back) — all the way up to a map-scale **30x**.
 
-The default multiplier is `3.9`. The client clamps it to whatever its own registered maximum is, so
-asking for more than it allows is harmless.
+The default multiplier is `10`, and the slider goes to `30`. The client validates and clamps the
+value to its own ceiling, so asking for more than it will grant is harmless — it just settles there.
 
 ## Build from source
 
