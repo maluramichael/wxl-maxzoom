@@ -9,22 +9,35 @@ fight, a landscape, or a raid on screen at once.
 
 > Built by [Michael Malura](https://malura.de).
 
-## How it works (and why it's safe)
+![Zoomed all the way out at factor 30 — the character is a speck far below](store/screenshot.png)
 
-This module **patches nothing in memory and writes no game address.** It asks the client to change
-its *own* setting, through the client's *own* Lua/CVar path:
+## How it works
 
-```lua
-SetCVar("cameraDistanceMaxFactor", "3.9")
-```
+Two levers, together, take the camera far past its stock limit:
 
-WarcraftXL exposes the engine's verified FrameScript executor, so the module runs that one line in
-the client's script context on every world enter, and again whenever you move the overlay slider.
-The client then validates and clamps the value itself — the worst case is the client refusing a
-number, never a crash. That makes this one of the least invasive mods you can run.
+**1. The multiplier.** The client's `cameraDistanceMaxFactor` console variable scales the base camera
+distance (`cameraDistanceMax`, default 15). The mod raises it through the client's *own* Lua/CVar
+path — WarcraftXL exposes the engine's verified FrameScript executor, so it runs
+`SetCVar("cameraDistanceMaxFactor", ...)` in the client's script context.
 
-The value is re-asserted on every loading screen (the client reloads CVars across them), so it
-sticks across logins and zone changes.
+**2. The hard clamp.** On its own, lever 1 stops at ~50 yards: the engine computes the effective
+distance as `min(cameraDistanceMaxFactor * cameraDistanceMax, 50.0)`, and that `50.0` is a hard
+ceiling — a single float constant in the client's `.rdata` at `0x00A1E2FC`, reverse-engineered with
+[Ghidra](https://ghidra-sre.org/) against build 12340. (It's *why* factor 6 and factor 30 looked
+identical — both were clamped to the same wall.) The mod lifts that ceiling in process memory
+(`VirtualProtect` → write → restore), so the multiplier actually controls the distance:
+factor 30 → ~450 yards.
+
+Both are re-asserted on every world enter (the client reloads CVars across loading screens), so the
+zoom sticks across logins and zone changes.
+
+### Is it safe?
+
+- The memory write is **guarded**: it fires only when the address holds the known stock value
+  (`50.0f`), touches one 4-byte float, and is **not persisted to disk** — restarting the client fully
+  reverts it.
+- WarcraftXL refuses to load a module built against a different client build than 12340, so the
+  hardcoded address can never be applied to an image where it means something else.
 
 ## Install
 

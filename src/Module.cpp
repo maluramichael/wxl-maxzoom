@@ -16,20 +16,29 @@
 //
 // HOW IT WORKS
 // ------------
-// The client's own console variable `cameraDistanceMaxFactor` is the multiplier on the maximum
-// camera pull-back distance. The default UI slider only reaches a small fraction of what the CVar
-// itself accepts. This module asks the client -- through its OWN Lua/CVar path -- to raise that
-// factor. Nothing is patched in memory and no address is written: we call the engine's FrameScript
-// executor (a WarcraftXL-verified landmark) to run `SetCVar("cameraDistanceMaxFactor", ...)`, which
-// the client then validates and clamps itself. That makes this one of the safest possible mods --
-// the worst case is the client refusing a value, never a crash.
+// Two levers, together, take the 3.3.5a camera far past its stock limit:
 //
-// The value is re-asserted on every world enter (login / loading screen), and is adjustable live
-// from the WarcraftXL overlay via a slider.
+// 1. The multiplier. The client's console variable `cameraDistanceMaxFactor` scales the base camera
+//    pull-back distance (`cameraDistanceMax`, default 15.0). We raise it through the client's OWN
+//    Lua/CVar path -- WarcraftXL exposes the engine's verified FrameScript executor, so the module
+//    runs `SetCVar("cameraDistanceMaxFactor", ...)` in the client's script context.
+//
+// 2. The hard clamp. On its own, lever 1 does nothing past ~50 yards: the engine computes the
+//    effective distance as `min(cameraDistanceMaxFactor * cameraDistanceMax, 50.0)` and that 50.0 is
+//    a hard ceiling (a single float constant in the client's .rdata at 0x00A1E2FC, reverse-engineered
+//    with Ghidra against build 12340 -- it is why factor 6 and factor 30 looked identical, both
+//    clamped to the same wall). This module lifts that ceiling in process memory (VirtualProtect ->
+//    write -> restore), so the multiplier above actually controls the distance: factor 30 -> ~450
+//    yards. The patch is guarded to only fire when the stock value (50.0) is present, touches one
+//    4-byte float, and is not persisted to disk -- a restart of the client fully reverts it.
+//
+// Both are re-asserted on every world enter (login / loading screen), and the factor is adjustable
+// live from the WarcraftXL overlay via a slider.
 
 #include "wxl/EventScript.hpp"   // wxl::ext::EventScript + the shared wxl::events::Event enum
 #include "game/Script.hpp"        // pulls in the verified wxl::offsets::engine::lua landmarks
 
+#include <windows.h>
 #include <cstdio>
 
 namespace wxl_maxzoom
@@ -47,6 +56,30 @@ namespace wxl_maxzoom
     namespace lua = wxl::offsets::engine::lua;
     using ExecFn = void(__cdecl*)(const char* source, void* state);
     using CtxFn  = void*(__cdecl*)();
+
+    // The hard camera-distance ceiling. A float in the client's .rdata that the engine clamps the
+    // effective camera distance against (min(factor*base, THIS)). Reverse-engineered with Ghidra on
+    // build 12340; guarded below so the patch only fires against exactly this client.
+    constexpr uintptr_t kCamClampAddr = 0x00A1E2FC;
+    constexpr float     kStockClamp   = 50.0f;      // the value the stock client ships
+    constexpr float     kLiftedClamp  = 100000.0f;  // effectively "no ceiling"; the factor now decides
+
+    /// Raise the engine's hard camera-distance ceiling in process memory. Idempotent and guarded:
+    /// it writes only when the address currently holds the known stock value (or our lifted one), so
+    /// a wrong image is left untouched. Returns true if the ceiling is now lifted.
+    static bool LiftCameraClamp()
+    {
+        float* p = reinterpret_cast<float*>(kCamClampAddr);
+        DWORD old = 0;
+        if (!VirtualProtect(p, sizeof(float), PAGE_READWRITE, &old))
+            return false;
+        const bool known = (*p == kStockClamp || *p == kLiftedClamp);
+        if (known)
+            *p = kLiftedClamp;
+        DWORD tmp = 0;
+        VirtualProtect(p, sizeof(float), old, &tmp);
+        return known;
+    }
 
     /// Runs a line of Lua in the client's active FrameScript context, or does nothing if scripting is
     /// not up yet (e.g. still on the glue/login screen).
@@ -71,10 +104,11 @@ namespace wxl_maxzoom
 
         float* Factor() { return &factor_; }
 
-        /// Push the current factor into the client's CVar. Safe to call at any time; a no-op until
-        /// scripting exists.
+        /// Lift the engine's hard ceiling, then push the current factor into the client's CVar. Safe
+        /// to call at any time; the CVar half is a no-op until scripting exists.
         void Apply()
         {
+            LiftCameraClamp();
             char lua[96];
             std::snprintf(lua, sizeof(lua),
                           "SetCVar(\"cameraDistanceMaxFactor\", \"%.2f\")", factor_);
@@ -117,7 +151,7 @@ const WXL_PluginInfo* __cdecl WXL_Query(void)
         sizeof(WXL_PluginInfo),
         WXL_API_VERSION,
         "wxl-maxzoom",
-        2,
+        3,
         WXL_CLIENT_BUILD,
     };
     return &info;
@@ -133,8 +167,12 @@ int __cdecl WXL_Load(const WXL_Api* api)
     wxl::ext::EventScript::Bind(api);              // hand the event base its service table
     wxl_maxzoom::g_maxzoom = new wxl_maxzoom::MaxZoom(); // ctor binds OnWorldEnter, now that Bind ran
 
+    // Lift the hard ceiling now, at load, so it is already gone before the first world render.
+    const bool lifted = wxl_maxzoom::LiftCameraClamp();
+
     api->UiAddPanel("Max Zoom", &wxl_maxzoom::PanelBody, nullptr);
-    api->Log(WXL_LOG_INFO, "wxl-maxzoom", "max-zoom ready (default factor %.1f)",
-             wxl_maxzoom::kDefaultFactor);
+    api->Log(WXL_LOG_INFO, "wxl-maxzoom",
+             "max-zoom ready (default factor %.1f, hard ceiling %s)",
+             wxl_maxzoom::kDefaultFactor, lifted ? "lifted" : "NOT lifted (unexpected image?)");
     return 1;
 }

@@ -4,8 +4,11 @@ Pull the camera **way** back. The stock 3.3.5a client caps how far you can zoom 
 slider stops even shorter. **Max Zoom** raises the client's own `cameraDistanceMaxFactor` so you can
 frame a whole boss fight, a sweeping landscape, or your entire party at once.
 
-- **Safe by design** — no memory patching. It changes the client's own console variable through the
-  client's own scripting path, and the client validates the value itself.
+- **Two-lever design** — raises the client's own `cameraDistanceMaxFactor` CVar, *and* lifts the
+  engine's hard 50-yard camera ceiling (a single float, reverse-engineered with Ghidra) so the
+  multiplier actually reaches its full range.
+- **Guarded & reversible** — the one 4-byte memory write only fires against the known stock value on
+  build 12340, and isn't persisted; a restart reverts it.
 - **Live control** — open the WarcraftXL overlay (**F9**) and drag the slider to taste.
 - **Sticks** — re-applied on every world enter, so it survives loading screens and logins.
 

@@ -8,6 +8,9 @@
 *.pdb
 *.obj
 
+# ...but keep store art
+!store/*.png
+
 # IDE / OS
 .vs/
 .vscode/
