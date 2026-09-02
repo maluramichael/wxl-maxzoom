@@ -1,0 +1,35 @@
+{
+  "manifest": 1,
+
+  "extension": {
+    "id": "wxl-maxzoom",
+    "version": "1.0.0",
+    "abi": "1.1",
+    "entry": "wxl-maxzoom.dll",
+    "assets": [],
+    "requires": {},
+    "conflicts": [],
+
+    "hooks": [
+      { "target": "Event.OnWorldEnter" }
+    ]
+  },
+
+  "deploy": {
+    "mode": "release",
+    "match": "*.dll"
+  },
+
+  "listing": {
+    "title": "Max Zoom",
+    "tagline": "Lifts the camera zoom-out limit far past the stock ceiling, adjustable live.",
+    "description": "store/description.md",
+    "cover": "store/cover.png",
+    "gallery": [],
+    "categories": ["camera", "quality-of-life"],
+    "accent": "#3aa0ff"
+  },
+
+  "license": "GPL-3.0-or-later",
+  "signature": null
+}

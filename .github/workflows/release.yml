@@ -1,0 +1,72 @@
+# Builds wxl-maxzoom.dll against wxl-core's build shell and publishes it as a GitHub Release on every
+# push to main/master. wxl-core is checked out fresh each run (branch v1.1) and this module's own
+# source is copied into its extensions/wxl-maxzoom/ folder, where wxl-core's root CMakeLists.txt
+# auto-discovers it as a build target -- no CMakeLists.txt of our own needed. The release tag tracks
+# wxl.json's version field, so pushing without bumping it updates the existing release in place.
+name: Build and Release
+
+on:
+  push:
+    branches: [main, master]
+
+permissions:
+  contents: write   # needed to publish a Release
+
+env:
+  EXT_NAME: wxl-maxzoom
+  CORE_REPO: WarcraftXL/wxl-core
+  CORE_REF: v1.1
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout this module
+        uses: actions/checkout@v4
+        with:
+          path: ext
+
+      - name: Checkout wxl-core (${{ env.CORE_REF }})
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.CORE_REPO }}
+          ref: ${{ env.CORE_REF }}
+          submodules: recursive
+          path: core
+
+      - name: Drop this module's source into core/extensions/
+        shell: pwsh
+        run: |
+          $dest = "core/extensions/$env:EXT_NAME"
+          New-Item -ItemType Directory -Force -Path $dest | Out-Null
+          Copy-Item -Path "ext/*" -Destination $dest -Recurse -Force
+
+      - name: Configure (Win32)
+        shell: pwsh
+        run: cmake -S core -B core/build -A Win32
+
+      - name: Build
+        shell: pwsh
+        run: cmake --build core/build --config Release --target $env:EXT_NAME --parallel
+
+      - name: Stage the DLL
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          Copy-Item "core/build/Release/$env:EXT_NAME.dll" -Destination "dist/$env:EXT_NAME.dll"
+
+      - name: Read the version out of the manifest
+        id: v
+        shell: pwsh
+        run: |
+          $v = (Get-Content ext/wxl.json -Raw | ConvertFrom-Json).extension.version
+          if (-not $v) { throw "wxl.json carries no extension.version" }
+          "version=$v" >> $env:GITHUB_OUTPUT
+
+      - name: Publish Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ steps.v.outputs.version }}
+          name: ${{ env.EXT_NAME }} ${{ steps.v.outputs.version }}
+          body: Built from ${{ github.sha }}
+          files: dist/${{ env.EXT_NAME }}.dll

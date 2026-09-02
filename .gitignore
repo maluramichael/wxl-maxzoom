@@ -1,0 +1,16 @@
+# Build output
+/build/
+/dist/
+*.dll
+*.exe
+*.lib
+*.exp
+*.pdb
+*.obj
+
+# IDE / OS
+.vs/
+.vscode/
+*.user
+Thumbs.db
+.DS_Store
