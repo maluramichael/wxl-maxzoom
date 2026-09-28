@@ -1,5 +1,10 @@
 # wxl-maxzoom
 
+<!-- links:start -->
+[![Support me on Ko-fi](https://malura.de/assets/badge/kofi.svg)](https://malura.de/go/kofi?ref=wxl-maxzoom)
+[![Check out my page](https://malura.de/assets/badge/malura.svg)](https://malura.de/go/site?ref=wxl-maxzoom)
+<!-- links:end -->
+
 **Unlock the World of Warcraft 3.3.5a (build 12340) camera — zoom-out, view distance, and fog — far past the stock limits, adjustable live.**
 
 A [WarcraftXL](https://github.com/WarcraftXL) module. Stock, the client only lets the camera pull back
