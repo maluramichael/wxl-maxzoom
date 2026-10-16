@@ -44,7 +44,9 @@
 //    the horizon -- nothing in the world reaches them, so distance fog never blends in.
 //
 // Everything is re-asserted on every world enter (the client reloads state across loading screens),
-// and all of it is adjustable live from the WarcraftXL overlay (F9).
+// and all of it is adjustable live from the WarcraftXL overlay (F9). The world-enter re-assert only
+// raises the limit; it leaves the camera where it is, so arriving through a hearthstone or portal does
+// not throw the camera out to the maximum. Only the overlay slider and button move it.
 
 #include "wxl/EventScript.hpp"   // wxl::ext::EventScript + the shared wxl::events::Event enum
 #include "game/Script.hpp"        // pulls in the verified wxl::offsets::engine::lua landmarks
@@ -65,7 +67,10 @@ namespace wxl_maxzoom
     // The FrameScript entry points, taken by value from the SDK's verified landmark table (reaching
     // them via game/Script.hpp keeps this file clear of any direct offsets/ include).
     namespace lua = wxl::offsets::engine::lua;
-    using ExecFn = void(__cdecl*)(const char* source, void* state);
+    // FrameScript_Execute(source, chunkName, taintSource): the client uses its own Lua state, which is not an
+    // argument (wxl-core's game/Lua.hpp). Passing the state here made it the chunk name, and the taint source
+    // whatever was left on the stack.
+    using ExecFn = void(__cdecl*)(const char* source, const char* chunkName, void* taintSource);
     using CtxFn  = void*(__cdecl*)();
 
     // The hard camera-distance ceiling. A float in the client's .rdata that the engine clamps the
@@ -152,8 +157,28 @@ namespace wxl_maxzoom
         auto execute    = reinterpret_cast<ExecFn>(lua::kFrameScriptExecute);
         void* ctx = getContext();
         if (ctx)
-            execute(source, ctx);
+            execute(source, "wxl-maxzoom", nullptr); // no taint source: the client's own code, not an addon's
     }
+
+    // Blizzard's camera panel (FrameXML InterfaceOptionsPanels) ties its "Max Camera Distance" slider, range 1-2, to
+    // cameraDistanceMaxFactor and writes every change of the slider straight to the CVar. It sets that range and
+    // refreshes on the first PLAYER_ENTERING_WORLD after a login or /reload, and whenever Interface Options opens: the
+    // slider clamps the factor to 2 and writes 2 back, so the zoom stops at ~30 yd until the next loading screen.
+    // The guard widens that slider to our range and, once a second, puts the factor back if anything lowered it.
+    // It runs from OnUpdate, not only from world enter: a /reload never reaches world enter, and at login world enter
+    // runs before the game UI exists. It does nothing while the guard is up and the factor matches, and nothing on
+    // the login and character screens (the glue UI has no UIParent, and the camera CVars don't exist there yet).
+    // Lua globals: WXL_MaxZoomFactor (the factor to keep) and the frame WXL_MaxZoomGuard (one per UI load).
+    static const char kGuardLua[] =
+        "if not UIParent then return end "
+        "if WXL_MaxZoomGuard and WXL_MaxZoomFactor==%.2f then return end "
+        "WXL_MaxZoomFactor=%.2f "
+        "local s=InterfaceOptionsCameraPanelMaxDistanceSlider if s then s:SetMinMaxValues(%.0f,%.0f) end "
+        "if not WXL_MaxZoomGuard then local f=CreateFrame('Frame','WXL_MaxZoomGuard') local t=0 "
+        "f:SetScript('OnUpdate',function(_,e) t=t+e if t<1 then return end t=0 "
+        "local w=WXL_MaxZoomFactor local c=tonumber(GetCVar('cameraDistanceMaxFactor')) or 0 "
+        "if w and c<w-0.01 then local s=InterfaceOptionsCameraPanelMaxDistanceSlider "
+        "if s then s:SetMinMaxValues(%.0f,%.0f) end SetCVar('cameraDistanceMaxFactor',w) end end) end";
 
     class MaxZoom final : public wxl::ext::EventScript
     {
@@ -164,28 +189,41 @@ namespace wxl_maxzoom
             // CVars across loading screens, so a single apply would not stick. (Fog rides a per-frame
             // hook instead, so it needs no re-assert.)
             on<&MaxZoom::OnWorldEnter>(wxl::events::Event::OnWorldEnter);
+            on<&MaxZoom::OnUpdate>(wxl::events::Event::OnUpdate);
         }
 
         float* Factor()       { return &factor_; }
         float* ViewDistance() { return &viewDistance_; }
         int*   FogDisabled()  { return &fogDisabled_; }
 
-        /// Lift the hard camera ceiling, raise the max-distance CVar, and immediately pull the camera
-        /// out to that new maximum. The engine also snaps the camera IN when the factor drops below the
-        /// current distance, so the slider drives the camera both ways on the spot. The move/smooth
-        /// speed CVars are cranked so that motion is near-instant instead of a slow glide.
+        /// Lift the hard camera ceiling, raise the max-distance CVar, and (with pullOut) immediately pull
+        /// the camera out to that new maximum. The engine also snaps the camera IN when the factor drops
+        /// below the current distance, so the slider drives the camera both ways on the spot. The
+        /// move/smooth speed CVars are cranked so that motion is near-instant instead of a slow glide.
         /// CameraZoomOut clamps to the max, so the margin just guarantees we hit it.
-        void ApplyZoom()
+        void ApplyZoom(bool pullOut = true)
         {
             LiftCameraClamp();
             char lua[256];
-            std::snprintf(lua, sizeof(lua),
+            const int used = std::snprintf(lua, sizeof(lua),
                           "SetCVar(\"cameraDistanceMoveSpeed\", \"50\");"
                           "SetCVar(\"cameraDistanceSmoothSpeed\", \"50\");"
-                          "SetCVar(\"cameraDistanceMaxFactor\", \"%.2f\");"
-                          "CameraZoomOut(%.0f)",
-                          factor_, factor_ * 15.0f + 10.0f);
+                          "SetCVar(\"cameraDistanceMaxFactor\", \"%.2f\")",
+                          factor_);
+            if (pullOut && used > 0 && used < static_cast<int>(sizeof(lua)))
+                std::snprintf(lua + used, sizeof(lua) - used, ";CameraZoomOut(%.0f)", factor_ * 15.0f + 10.0f);
             RunLua(lua);
+            EnsureGuard();
+        }
+
+        /// The guard chunk: a no-op while the guard is up and holds this factor; otherwise it sets both up.
+        void EnsureGuard()
+        {
+            char guard[1024];
+            const int used = std::snprintf(guard, sizeof(guard), kGuardLua, factor_, factor_, kSliderMin, kSliderMax,
+                                           kSliderMin, kSliderMax);
+            if (used > 0 && used < static_cast<int>(sizeof(guard)))
+                RunLua(guard);
         }
 
         /// Lift the farclip cap, unlock the override, and set the render far plane from the slider.
@@ -202,10 +240,24 @@ namespace wxl_maxzoom
         /// Publish the toggle to the per-frame fog detour. Cheap; safe anywhere.
         void ApplyFog() { g_fogDisabled = (fogDisabled_ != 0); }
 
-        void ApplyAll() { ApplyZoom(); ApplyViewDistance(); ApplyFog(); }
+        /// World enter: restore the limits the loading screen reset, without moving the camera.
+        void ApplyAll() { ApplyZoom(false); ApplyViewDistance(); ApplyFog(); }
 
     private:
         void OnWorldEnter(const wxl::events::WorldEnterArgs&) { ApplyAll(); }
+
+        // Once a second, whatever the client is doing: a /reload or a login brings a new UI without a guard.
+        void OnUpdate(const wxl::events::UpdateArgs& args)
+        {
+            constexpr float kGuardCheckSeconds = 1.0f;
+            sinceGuardCheck_ += args.dt > 0.0f && args.dt < 10.0f ? args.dt : 0.0f;
+            if (sinceGuardCheck_ < kGuardCheckSeconds)
+                return;
+            sinceGuardCheck_ = 0.0f;
+            EnsureGuard();
+        }
+
+        float sinceGuardCheck_ = 0.0f;
 
         float factor_       = kDefaultFactor;
         float viewDistance_ = kDefaultViewDist;
