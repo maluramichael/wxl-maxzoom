@@ -10,7 +10,7 @@ Take the camera's three stock limits off at once:
   producer, so the landscape stays crisp all the way out.
 
 **Safe & reversible** — the memory writes are guarded to the known stock values on build 12340, are
-tiny, and aren't saved to disk; a restart reverts everything. **Live control** from the WarcraftXL
-overlay (**F9**). Everything re-applies on world enter, so it sticks across logins and zone changes.
+tiny, and last for the current process. Change zoom, view distance, or fog in the WarcraftXL
+overlay (**F9**). Max Zoom saves each change beside the DLL and restores it on the next launch.
 
 Built by [Michael Malura](https://malura.de).

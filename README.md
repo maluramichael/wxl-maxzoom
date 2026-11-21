@@ -50,8 +50,8 @@ screens); the fog toggle rides a persistent per-frame hook.
 ### Is it safe?
 
 - The memory writes are **guarded** (they fire only against the known stock values on client build
-  12340), tiny (single floats), and **not persisted to disk** — restarting the client fully reverts
-  everything.
+  12340) and tiny (single floats). They last for the current process. The module reads your saved
+  preferences when it loads again.
 - WarcraftXL refuses to load a module built against a different client build than 12340, so the
   hardcoded addresses can never be applied to an image where they mean something else.
 
@@ -73,7 +73,11 @@ Press **F9** to open the WarcraftXL overlay, then use the **Max Zoom** panel:
 - **`farclip (yards)`** slider (500–10000): the render view distance. Default 2000 (stock max is ~791).
 - **`Disable fog`** checkbox: switches the distance fog off.
 
-All of it is applied automatically on world enter too, so it sticks across logins and zone changes.
+Changing any of these controls automatically saves that setting to
+`Extensions/wxl-maxzoom/wxl-maxzoom.ini`, beside the DLL. For example, `ViewDistance=1500` under
+`[MaxZoom]` restores a 1,500-yard view distance the next time the client starts. These settings
+are shared by characters using this client. To reset all three, close the client and remove the
+`Factor`, `ViewDistance`, and `DisableFog` entries from that section.
 
 ## Build from source
 

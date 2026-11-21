@@ -50,6 +50,7 @@
 
 #include "wxl/EventScript.hpp"   // wxl::ext::EventScript + the shared wxl::events::Event enum
 #include "game/Script.hpp"        // pulls in the verified wxl::offsets::engine::lua landmarks
+#include "Settings.hpp"
 
 #include <windows.h>
 #include <cstdio>
@@ -180,6 +181,8 @@ namespace wxl_maxzoom
         "if w and c<w-0.01 then local s=InterfaceOptionsCameraPanelMaxDistanceSlider "
         "if s then s:SetMinMaxValues(%.0f,%.0f) end SetCVar('cameraDistanceMaxFactor',w) end end) end";
 
+    const WXL_Api* g_api = nullptr;
+
     class MaxZoom final : public wxl::ext::EventScript
     {
     public:
@@ -195,6 +198,14 @@ namespace wxl_maxzoom
         float* Factor()       { return &factor_; }
         float* ViewDistance() { return &viewDistance_; }
         int*   FogDisabled()  { return &fogDisabled_; }
+
+        void SaveSetting(const wchar_t* key, float value)
+        {
+            const bool saved = settings::Write(iniPath_, key, value);
+            if (!saved && !saveFailed_)
+                g_api->Log(WXL_LOG_WARN, "wxl-maxzoom", "Could not save wxl-maxzoom.ini beside the module DLL");
+            saveFailed_ = !saved;
+        }
 
         /// Lift the hard camera ceiling, raise the max-distance CVar, and (with pullOut) immediately pull
         /// the camera out to that new maximum. The engine also snaps the camera IN when the factor drops
@@ -259,15 +270,16 @@ namespace wxl_maxzoom
 
         float sinceGuardCheck_ = 0.0f;
 
-        float factor_       = kDefaultFactor;
-        float viewDistance_ = kDefaultViewDist;
-        int   fogDisabled_  = 0;      // int, not bool: UiCheckbox writes through an int*
+        const std::wstring iniPath_ = settings::IniPath();
+        bool saveFailed_ = false;
+        float factor_       = settings::Read(iniPath_, L"Factor", kDefaultFactor, kSliderMin, kSliderMax);
+        float viewDistance_ = settings::Read(iniPath_, L"ViewDistance", kDefaultViewDist, kViewDistMin, kViewDistMax);
+        int   fogDisabled_  = settings::Read(iniPath_, L"DisableFog", 0.0f, 0.0f, 1.0f) >= 0.5f;
     };
 
     // Constructed in WXL_Load, never at static-init: wxl::ext::EventScript binds through the service
     // table, which does not exist until the core hands it over, so a subclass built earlier would bind
     // to nothing. The extension is never unloaded, so it simply lives for the process lifetime.
-    const WXL_Api* g_api     = nullptr;
     MaxZoom*       g_maxzoom = nullptr;
 
     // --- overlay panel -------------------------------------------------------------------------
@@ -277,19 +289,28 @@ namespace wxl_maxzoom
 
         g_api->UiText("Camera zoom-out multiplier. Stock = 1.0; higher pulls the camera back.");
         if (g_api->UiSliderFloat("cameraDistanceMaxFactor", g_maxzoom->Factor(), kSliderMin, kSliderMax))
+        {
             g_maxzoom->ApplyZoom(); // live: apply the instant the slider moves
+            g_maxzoom->SaveSetting(L"Factor", *g_maxzoom->Factor());
+        }
         if (g_api->UiButton("Apply zoom now"))
             g_maxzoom->ApplyZoom();
 
         g_api->UiSeparator();
         g_api->UiText("View distance (farclip). Stock max ~791 yards.");
         if (g_api->UiSliderFloat("farclip (yards)", g_maxzoom->ViewDistance(), kViewDistMin, kViewDistMax))
+        {
             g_maxzoom->ApplyViewDistance();
+            g_maxzoom->SaveSetting(L"ViewDistance", *g_maxzoom->ViewDistance());
+        }
 
         g_api->UiSeparator();
         g_api->UiText("Distance fog.");
         if (g_api->UiCheckbox("Disable fog", g_maxzoom->FogDisabled()))
+        {
             g_maxzoom->ApplyFog();
+            g_maxzoom->SaveSetting(L"DisableFog", static_cast<float>(*g_maxzoom->FogDisabled() != 0));
+        }
     }
 }
 
@@ -300,7 +321,7 @@ const WXL_PluginInfo* __cdecl WXL_Query(void)
         sizeof(WXL_PluginInfo),
         WXL_API_VERSION,
         "wxl-maxzoom",
-        4,
+        5,
         WXL_CLIENT_BUILD,
     };
     return &info;
@@ -315,6 +336,7 @@ int __cdecl WXL_Load(const WXL_Api* api)
     wxl_maxzoom::g_api = api;
     wxl::ext::EventScript::Bind(api);              // hand the event base its service table
     wxl_maxzoom::g_maxzoom = new wxl_maxzoom::MaxZoom(); // ctor binds OnWorldEnter, now that Bind ran
+    wxl_maxzoom::g_maxzoom->ApplyFog();
 
     // Lift both hard ceilings now, at load, so they are gone before the first world render.
     const bool camLifted = wxl_maxzoom::LiftCameraClamp();
@@ -330,10 +352,10 @@ int __cdecl WXL_Load(const WXL_Api* api)
     api->UiAddPanel("Max Zoom", &wxl_maxzoom::PanelBody, nullptr);
     api->Log(WXL_LOG_INFO, "wxl-maxzoom",
              "ready (factor %.1f; camera ceiling %s; farclip cap %s; view %.0f; fog hook %s)",
-             wxl_maxzoom::kDefaultFactor,
+             *wxl_maxzoom::g_maxzoom->Factor(),
              camLifted ? "lifted" : "NOT lifted",
              fcLifted  ? "lifted" : "NOT lifted",
-             wxl_maxzoom::kDefaultViewDist,
+             *wxl_maxzoom::g_maxzoom->ViewDistance(),
              fogHooked ? "attached" : "FAILED");
     return 1;
 }
